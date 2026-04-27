@@ -61,6 +61,7 @@ function makeEmptyProduct(index = 1) {
     qty: "1",
     buyUsd: "0",
     buyCny: "0",
+    buyKrw: "0",       // ← 실제 원화 결제액 추가
     salePrice: "0",
     salesStatus: "미판매",
     restockStatus: "보통",
@@ -77,6 +78,7 @@ function makeSampleProducts() {
       qty: "2",
       buyUsd: "0",
       buyCny: "13",
+      buyKrw: "0",
       salePrice: "29900",
       salesStatus: "판매중",
       restockStatus: "보통",
@@ -89,6 +91,7 @@ function makeSampleProducts() {
       qty: "2",
       buyUsd: "0",
       buyCny: "18",
+      buyKrw: "0",
       salePrice: "34900",
       salesStatus: "미판매",
       restockStatus: "재주문 필요",
@@ -111,10 +114,21 @@ function calculateRows(products, shared) {
     const qty = Math.max(1, toNumber(item.qty));
     const buyUsd = toNumber(item.buyUsd);
     const buyCny = toNumber(item.buyCny);
+    const buyKrw = toNumber(item.buyKrw);
     const salePrice = toNumber(item.salePrice);
-    const unitBuyCostKrw = buyUsd * usdRate + buyCny * cnyRate;
+
+    // 실제 원화 결제액이 입력된 경우 우선 사용, 없으면 USD/CNY 환산
+    const calculatedBuyCostKrw = buyUsd * usdRate + buyCny * cnyRate;
+    const unitBuyCostKrw = buyKrw > 0 ? buyKrw : calculatedBuyCostKrw;
     const totalBuyCostKrw = unitBuyCostKrw * qty;
-    return { ...item, qty, buyUsd, buyCny, salePrice, unitBuyCostKrw, totalBuyCostKrw };
+
+    // 환산 차이 (실제 - 계산)
+    const krwDiff = buyKrw > 0 ? buyKrw - calculatedBuyCostKrw : 0;
+
+    return {
+      ...item, qty, buyUsd, buyCny, buyKrw, salePrice,
+      unitBuyCostKrw, totalBuyCostKrw, calculatedBuyCostKrw, krwDiff,
+    };
   });
 
   const totalQty = baseRows.reduce((sum, row) => sum + row.qty, 0);
@@ -130,10 +144,12 @@ function calculateRows(products, shared) {
     const smartStoreFeePerUnit = row.salePrice * smartStoreFeeRate;
     const adCostPerUnit = row.salePrice * adCostRate;
     const simpleVatPerUnit = row.salePrice * simpleVatRate * 0.1;
+
     const totalCostPerUnit =
       row.unitBuyCostKrw + overseasAllocatedPerUnit + domesticPerUnit +
       packagingPerUnit + fixedAdPerUnit + smartStoreFeePerUnit +
       adCostPerUnit + simpleVatPerUnit;
+
     const totalCostAll = totalCostPerUnit * row.qty;
     const revenueAll = row.salePrice * row.qty;
     const profitPerUnit = row.salePrice - totalCostPerUnit;
@@ -142,11 +158,13 @@ function calculateRows(products, shared) {
     const costRate = row.salePrice > 0 ? (totalCostPerUnit / row.salePrice) * 100 : 0;
     const target30 = totalCostPerUnit / 0.7;
     const target40 = totalCostPerUnit / 0.6;
+
     return {
       ...row, buyRatio, overseasAllocatedTotal, overseasAllocatedPerUnit,
-      domesticPerUnit, packagingPerUnit, fixedAdPerUnit, smartStoreFeePerUnit,
-      adCostPerUnit, simpleVatPerUnit, totalCostPerUnit, totalCostAll,
-      revenueAll, profitPerUnit, profitAll, marginRate, costRate, target30, target40,
+      domesticPerUnit, packagingPerUnit, fixedAdPerUnit,
+      smartStoreFeePerUnit, adCostPerUnit, simpleVatPerUnit,
+      totalCostPerUnit, totalCostAll, revenueAll,
+      profitPerUnit, profitAll, marginRate, costRate, target30, target40,
     };
   });
 
@@ -166,7 +184,8 @@ function calculateRows(products, shared) {
 function exportToCsv(records) {
   const headers = [
     "묶음명","매입일","저장일","상품명","SKU","판매상태","재주문상태",
-    "수량","판매가","개당매입원가","개당총원가","총매출","총원가","개당순이익","총순이익","원가율","마진율","이미지URL",
+    "수량","판매가","개당매입원가(실제)","개당환산원가","원화차이","개당총원가",
+    "총매출","총원가","개당순이익","총순이익","원가율","마진율","이미지URL",
   ];
   const lines = [headers.join(",")];
   records.forEach((record) => {
@@ -176,7 +195,10 @@ function exportToCsv(records) {
           record.bundleName, record.purchaseDate, record.savedAt || "",
           item.name, item.sku || "", item.salesStatus || "미판매",
           item.restockStatus || "보통", item.qty, item.salePrice,
-          Math.round(item.unitBuyCostKrw), Math.round(item.totalCostPerUnit),
+          Math.round(item.unitBuyCostKrw),
+          Math.round(item.calculatedBuyCostKrw || 0),
+          Math.round(item.krwDiff || 0),
+          Math.round(item.totalCostPerUnit),
           Math.round(item.revenueAll), Math.round(item.totalCostAll),
           Math.round(item.profitPerUnit), Math.round(item.profitAll),
           item.costRate.toFixed(2), item.marginRate.toFixed(2), item.imageUrl || "",
@@ -194,7 +216,8 @@ function exportToXlsx(records) {
   const summaryRows = records.map((record) => ({
     묶음명: record.bundleName, 매입일: record.purchaseDate, 저장일: record.savedAt,
     상품종수: record.items.length, 총수량: record.summary.totalQty,
-    전체매출: Math.round(record.summary.totalRevenue), 전체원가: Math.round(record.summary.totalCost),
+    전체매출: Math.round(record.summary.totalRevenue),
+    전체원가: Math.round(record.summary.totalCost),
     전체순이익: Math.round(record.summary.totalProfit),
     전체원가율: Number(record.summary.costRate.toFixed(2)),
     전체마진율: Number(record.summary.marginRate.toFixed(2)),
@@ -202,13 +225,18 @@ function exportToXlsx(records) {
   const detailRows = records.flatMap((record) =>
     record.items.map((item) => ({
       묶음명: record.bundleName, 매입일: record.purchaseDate, 저장일: record.savedAt,
-      상품명: item.name, SKU: item.sku || "", 판매상태: item.salesStatus || "미판매",
-      재주문상태: item.restockStatus || "보통", 수량: item.qty,
-      판매가: Math.round(item.salePrice), 개당매입원가: Math.round(item.unitBuyCostKrw),
-      개당총원가: Math.round(item.totalCostPerUnit), 총매출: Math.round(item.revenueAll),
-      총원가: Math.round(item.totalCostAll), 개당순이익: Math.round(item.profitPerUnit),
-      총순이익: Math.round(item.profitAll),
-      원가율: Number(item.costRate.toFixed(2)), 마진율: Number(item.marginRate.toFixed(2)),
+      상품명: item.name, SKU: item.sku || "",
+      판매상태: item.salesStatus || "미판매",
+      재주문상태: item.restockStatus || "보통",
+      수량: item.qty, 판매가: Math.round(item.salePrice),
+      개당매입원가실제: Math.round(item.unitBuyCostKrw),
+      개당환산원가: Math.round(item.calculatedBuyCostKrw || 0),
+      원화차이: Math.round(item.krwDiff || 0),
+      개당총원가: Math.round(item.totalCostPerUnit),
+      총매출: Math.round(item.revenueAll), 총원가: Math.round(item.totalCostAll),
+      개당순이익: Math.round(item.profitPerUnit), 총순이익: Math.round(item.profitAll),
+      원가율: Number(item.costRate.toFixed(2)),
+      마진율: Number(item.marginRate.toFixed(2)),
       이미지URL: item.imageUrl || "",
     }))
   );
@@ -222,9 +250,13 @@ function mapDbBundleToUi(bundle) {
     id: item.id, name: item.name ?? "", sku: item.sku ?? "",
     imageUrl: item.image_url ?? "", qty: item.qty ?? 1,
     buyUsd: item.buy_usd ?? 0, buyCny: item.buy_cny ?? 0,
-    salePrice: item.sale_price ?? 0, salesStatus: item.sales_status ?? "미판매",
+    buyKrw: item.buy_krw ?? 0,
+    salePrice: item.sale_price ?? 0,
+    salesStatus: item.sales_status ?? "미판매",
     restockStatus: item.restock_status ?? "보통",
     unitBuyCostKrw: item.unit_buy_cost_krw ?? 0,
+    calculatedBuyCostKrw: item.calculated_buy_cost_krw ?? 0,
+    krwDiff: item.krw_diff ?? 0,
     totalBuyCostKrw: item.total_buy_cost_krw ?? 0,
     buyRatio: item.buy_ratio ?? 0,
     overseasAllocatedTotal: item.overseas_allocated_total ?? 0,
@@ -262,6 +294,7 @@ function mapDbBundleToUi(bundle) {
       id: item.id || uid(), name: item.name, sku: item.sku,
       imageUrl: item.imageUrl, qty: String(item.qty ?? 1),
       buyUsd: String(item.buyUsd ?? 0), buyCny: String(item.buyCny ?? 0),
+      buyKrw: String(item.buyKrw ?? 0),
       salePrice: String(item.salePrice ?? 0),
       salesStatus: item.salesStatus ?? "미판매",
       restockStatus: item.restockStatus ?? "보통",
@@ -276,11 +309,11 @@ function mapDbBundleToUi(bundle) {
   };
 }
 
-function InputField({ label, value, onChange, suffix, placeholder, type = "text" }) {
+function InputField({ label, value, onChange, suffix, placeholder, type = "text", highlight = false }) {
   return (
     <label className="block">
       <div className="mb-1.5 text-sm font-medium text-slate-700">{label}</div>
-      <div className="flex items-center rounded-2xl border border-slate-200 bg-white px-4 py-2.5 shadow-sm transition focus-within:border-slate-400">
+      <div className={`flex items-center rounded-2xl border px-4 py-2.5 shadow-sm transition focus-within:border-slate-400 ${highlight ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-white"}`}>
         <input
           type={type}
           inputMode={type === "number" ? "decimal" : undefined}
@@ -460,9 +493,13 @@ export default function App() {
       bundle_id: bundleId, name: row.name || "", sku: row.sku || "",
       image_url: row.imageUrl || "", qty: Math.round(toNumber(row.qty)),
       buy_usd: toNumber(row.buyUsd), buy_cny: toNumber(row.buyCny),
-      sale_price: toNumber(row.salePrice), sales_status: row.salesStatus || "미판매",
+      buy_krw: toNumber(row.buyKrw),
+      sale_price: toNumber(row.salePrice),
+      sales_status: row.salesStatus || "미판매",
       restock_status: row.restockStatus || "보통",
       unit_buy_cost_krw: toNumber(row.unitBuyCostKrw),
+      calculated_buy_cost_krw: toNumber(row.calculatedBuyCostKrw),
+      krw_diff: toNumber(row.krwDiff),
       total_buy_cost_krw: toNumber(row.totalBuyCostKrw),
       buy_ratio: toNumber(row.buyRatio),
       overseas_allocated_total: toNumber(row.overseasAllocatedTotal),
@@ -553,13 +590,8 @@ export default function App() {
     }
   };
 
-  const toggleExpand = (id) => {
-    setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
-
-  const toggleResult = (id) => {
-    setExpandedResults((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
+  const toggleExpand = (id) => setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggleResult = (id) => setExpandedResults((prev) => ({ ...prev, [id]: !prev[id] }));
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -578,29 +610,17 @@ export default function App() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button
-                onClick={fetchRates}
-                className="inline-flex items-center gap-2 rounded-2xl bg-emerald-500 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-400"
-              >
+              <button onClick={fetchRates} className="inline-flex items-center gap-2 rounded-2xl bg-emerald-500 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-400">
                 <RefreshCw className={`h-4 w-4 ${isFetchingRates ? "animate-spin" : ""}`} />
                 {isFetchingRates ? "불러오는 중" : "오늘 환율 반영"}
               </button>
-              <button
-                onClick={() => exportToCsv(filteredRecords)}
-                className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20"
-              >
+              <button onClick={() => exportToCsv(filteredRecords)} className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20">
                 <Download className="h-4 w-4" /> CSV
               </button>
-              <button
-                onClick={() => exportToXlsx(filteredRecords)}
-                className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20"
-              >
+              <button onClick={() => exportToXlsx(filteredRecords)} className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20">
                 <Download className="h-4 w-4" /> XLSX
               </button>
-              <button
-                onClick={resetForm}
-                className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20"
-              >
+              <button onClick={resetForm} className="inline-flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-2.5 text-sm font-medium text-white backdrop-blur transition hover:bg-white/20">
                 <RotateCcw className="h-4 w-4" /> 새 작업
               </button>
             </div>
@@ -608,37 +628,17 @@ export default function App() {
         </div>
 
         {rateMessage && (
-          <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-            {rateMessage}
-          </div>
+          <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{rateMessage}</div>
         )}
-
         {dbMessage && (
-          <div className="mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm">
-            {dbMessage}
-          </div>
+          <div className="mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm">{dbMessage}</div>
         )}
 
         {/* 요약 카드 */}
         <div className="mb-6 grid grid-cols-3 gap-3">
-          <SummaryCard
-            title="전체 매출"
-            value={`${formatNumber(result.summary.totalRevenue)}원`}
-            sub={`총 ${formatNumber(result.summary.totalQty)}개`}
-            icon={Coins}
-          />
-          <SummaryCard
-            title="전체 원가"
-            value={`${formatNumber(result.summary.totalCost)}원`}
-            sub={`원가율 ${formatPercent(result.summary.costRate)}`}
-            icon={Calculator}
-          />
-          <SummaryCard
-            title="전체 순이익"
-            value={`${formatNumber(result.summary.totalProfit)}원`}
-            sub={`마진율 ${formatPercent(result.summary.marginRate)}`}
-            icon={Package}
-          />
+          <SummaryCard title="전체 매출" value={`${formatNumber(result.summary.totalRevenue)}원`} sub={`총 ${formatNumber(result.summary.totalQty)}개`} icon={Coins} />
+          <SummaryCard title="전체 원가" value={`${formatNumber(result.summary.totalCost)}원`} sub={`원가율 ${formatPercent(result.summary.costRate)}`} icon={Calculator} />
+          <SummaryCard title="전체 순이익" value={`${formatNumber(result.summary.totalProfit)}원`} sub={`마진율 ${formatPercent(result.summary.marginRate)}`} icon={Package} />
         </div>
 
         <div className="space-y-4">
@@ -675,39 +675,75 @@ export default function App() {
           <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-bold">상품 목록</h2>
-              <button
-                onClick={addProduct}
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-              >
+              <button onClick={addProduct} className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
                 <Plus className="h-4 w-4" /> 상품 추가
               </button>
             </div>
 
-            <div className="space-y-3">
-              {products.map((product, index) => (
-                <div key={product.id} className="rounded-2xl border border-slate-200 p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div className="text-sm font-semibold text-slate-700">상품 {index + 1}</div>
-                    <button
-                      onClick={() => removeProduct(product.id)}
-                      className="inline-flex items-center gap-1 text-sm text-rose-500 transition hover:text-rose-600"
-                    >
-                      <Trash2 className="h-4 w-4" /> 삭제
-                    </button>
+            <div className="space-y-4">
+              {products.map((product, index) => {
+                const hasKrw = toNumber(product.buyKrw) > 0;
+                const calcKrw = toNumber(product.buyUsd) * toNumber(usdRate) + toNumber(product.buyCny) * toNumber(cnyRate);
+                const diff = hasKrw ? toNumber(product.buyKrw) - calcKrw : 0;
+
+                return (
+                  <div key={product.id} className="rounded-2xl border border-slate-200 p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <div className="text-sm font-semibold text-slate-700">상품 {index + 1}</div>
+                      <button onClick={() => removeProduct(product.id)} className="inline-flex items-center gap-1 text-sm text-rose-500 transition hover:text-rose-600">
+                        <Trash2 className="h-4 w-4" /> 삭제
+                      </button>
+                    </div>
+
+                    <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
+                      <InputField label="상품명" value={product.name} onChange={(v) => updateProduct(product.id, "name", v)} placeholder="상품명" />
+                      <InputField label="SKU" value={product.sku} onChange={(v) => updateProduct(product.id, "sku", v)} placeholder="SKU" />
+                      <InputField label="이미지 URL" value={product.imageUrl} onChange={(v) => updateProduct(product.id, "imageUrl", v)} placeholder="https://..." />
+                      <InputField label="수량" value={product.qty} onChange={(v) => updateProduct(product.id, "qty", v)} suffix="개" />
+                      <InputField label="개당 매입가 (USD)" value={product.buyUsd} onChange={(v) => updateProduct(product.id, "buyUsd", v)} suffix="$" />
+                      <InputField label="개당 매입가 (CNY)" value={product.buyCny} onChange={(v) => updateProduct(product.id, "buyCny", v)} suffix="¥" />
+                      <InputField label="판매가" value={product.salePrice} onChange={(v) => updateProduct(product.id, "salePrice", v)} suffix="원" />
+                      <SelectField label="판매 상태" value={product.salesStatus} onChange={(v) => updateProduct(product.id, "salesStatus", v)} options={["미판매", "판매중", "판매완료"]} />
+                    </div>
+
+                    {/* 실제 원화 결제액 섹션 */}
+                    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                      <div className="mb-2 text-xs font-semibold text-amber-800">
+                        💳 실제 원화 결제액 (선택)
+                      </div>
+                      <div className="grid gap-3 grid-cols-1 sm:grid-cols-3 items-end">
+                        <InputField
+                          label="개당 실제 결제액 (원화)"
+                          value={product.buyKrw}
+                          onChange={(v) => updateProduct(product.id, "buyKrw", v)}
+                          suffix="원"
+                          highlight={true}
+                          placeholder="직접 입력 (없으면 0)"
+                        />
+                        <div className="rounded-2xl bg-white border border-amber-200 px-4 py-2.5 text-sm">
+                          <div className="text-xs text-slate-500 mb-1">환산 원가 (USD+CNY)</div>
+                          <div className="font-semibold text-slate-700">{formatNumber(calcKrw)}원</div>
+                        </div>
+                        <div className={`rounded-2xl border px-4 py-2.5 text-sm ${diff > 0 ? "border-rose-200 bg-rose-50" : diff < 0 ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                          <div className="text-xs text-slate-500 mb-1">실제 vs 환산 차이</div>
+                          <div className={`font-semibold ${diff > 0 ? "text-rose-600" : diff < 0 ? "text-emerald-600" : "text-slate-400"}`}>
+                            {hasKrw ? `${diff > 0 ? "+" : ""}${formatNumber(diff)}원` : "미입력"}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-2 text-xs text-amber-700">
+                        {hasKrw
+                          ? "✅ 실제 결제액으로 원가 계산 중 (수수료·환율 차이 반영됨)"
+                          : "💡 알리페이·위챗페이 실제 결제액 입력 시 수수료·환율 차이까지 반영돼요"}
+                      </div>
+                    </div>
+
+                    <div className="mt-3 grid gap-3 grid-cols-1">
+                      <SelectField label="재주문 상태" value={product.restockStatus} onChange={(v) => updateProduct(product.id, "restockStatus", v)} options={["보통", "재주문 필요", "재주문 완료"]} />
+                    </div>
                   </div>
-                  <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
-                    <InputField label="상품명" value={product.name} onChange={(v) => updateProduct(product.id, "name", v)} placeholder="상품명" />
-                    <InputField label="SKU" value={product.sku} onChange={(v) => updateProduct(product.id, "sku", v)} placeholder="SKU" />
-                    <InputField label="이미지 URL" value={product.imageUrl} onChange={(v) => updateProduct(product.id, "imageUrl", v)} placeholder="https://..." />
-                    <InputField label="수량" value={product.qty} onChange={(v) => updateProduct(product.id, "qty", v)} suffix="개" />
-                    <InputField label="개당 매입가 (USD)" value={product.buyUsd} onChange={(v) => updateProduct(product.id, "buyUsd", v)} suffix="$" />
-                    <InputField label="개당 매입가 (CNY)" value={product.buyCny} onChange={(v) => updateProduct(product.id, "buyCny", v)} suffix="¥" />
-                    <InputField label="판매가" value={product.salePrice} onChange={(v) => updateProduct(product.id, "salePrice", v)} suffix="원" />
-                    <SelectField label="판매 상태" value={product.salesStatus} onChange={(v) => updateProduct(product.id, "salesStatus", v)} options={["미판매", "판매중", "판매완료"]} />
-                    <SelectField label="재주문 상태" value={product.restockStatus} onChange={(v) => updateProduct(product.id, "restockStatus", v)} options={["보통", "재주문 필요", "재주문 완료"]} />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <div className="mt-4">
@@ -722,7 +758,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* 계산 결과 — 접기/펼치기 */}
+          {/* 계산 결과 */}
           <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="mb-4 text-lg font-bold">현재 계산 결과</h2>
             <div className="space-y-3">
@@ -730,7 +766,6 @@ export default function App() {
                 const isExpanded = !!expandedResults[row.id];
                 return (
                   <div key={row.id} className="rounded-2xl border border-slate-200">
-                    {/* 헤더 — 항상 보임 */}
                     <button
                       onClick={() => toggleResult(row.id)}
                       className="flex w-full items-center justify-between gap-3 p-4 text-left hover:bg-slate-50 rounded-2xl"
@@ -748,6 +783,9 @@ export default function App() {
                           <div className="flex flex-wrap gap-2 text-xs text-slate-500 mt-0.5">
                             <span className="flex items-center gap-1"><Tag className="h-3 w-3" />{row.sku || "SKU 없음"}</span>
                             <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3" />{row.salesStatus || "미판매"}</span>
+                            {row.buyKrw > 0 && (
+                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">실결제 반영</span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -760,16 +798,45 @@ export default function App() {
                       </div>
                     </button>
 
-                    {/* 상세 — 펼쳤을 때만 */}
                     {isExpanded && (
                       <div className="border-t border-slate-100 p-4">
                         <div className="grid gap-3 sm:grid-cols-2">
                           <div className="rounded-2xl bg-slate-50 p-4 text-sm">
                             <div className="mb-2 font-semibold text-slate-700">개당 비용 요약</div>
-                            <div className="flex justify-between py-1"><span>개당 매입원가</span><strong>{formatNumber(row.unitBuyCostKrw)}원</strong></div>
-                            <div className="flex justify-between py-1"><span>개당 총원가</span><strong>{formatNumber(row.totalCostPerUnit)}원</strong></div>
-                            <div className="flex justify-between py-1"><span>원가율</span><strong>{formatPercent(row.costRate)}</strong></div>
-                            <div className="flex justify-between py-1"><span>마진율</span><strong>{formatPercent(row.marginRate)}</strong></div>
+                            <div className="flex justify-between py-1">
+                              <span className="text-slate-600">환산 매입원가</span>
+                              <span className="text-slate-500">{formatNumber(row.calculatedBuyCostKrw)}원</span>
+                            </div>
+                            {row.buyKrw > 0 && (
+                              <>
+                                <div className="flex justify-between py-1">
+                                  <span className="text-amber-700 font-medium">실제 결제액</span>
+                                  <strong className="text-amber-700">{formatNumber(row.buyKrw)}원</strong>
+                                </div>
+                                <div className="flex justify-between py-1">
+                                  <span className="text-slate-600">수수료·환율 차이</span>
+                                  <span className={row.krwDiff > 0 ? "text-rose-600" : "text-emerald-600"}>
+                                    {row.krwDiff > 0 ? "+" : ""}{formatNumber(row.krwDiff)}원
+                                  </span>
+                                </div>
+                              </>
+                            )}
+                            <div className="flex justify-between py-1 border-t border-slate-200 mt-1 pt-2">
+                              <span className="font-medium">개당 매입원가 (적용)</span>
+                              <strong>{formatNumber(row.unitBuyCostKrw)}원</strong>
+                            </div>
+                            <div className="flex justify-between py-1">
+                              <span>개당 총원가</span>
+                              <strong>{formatNumber(row.totalCostPerUnit)}원</strong>
+                            </div>
+                            <div className="flex justify-between py-1">
+                              <span>원가율</span>
+                              <strong>{formatPercent(row.costRate)}</strong>
+                            </div>
+                            <div className="flex justify-between py-1">
+                              <span>마진율</span>
+                              <strong>{formatPercent(row.marginRate)}</strong>
+                            </div>
                           </div>
                           <div className="rounded-2xl bg-slate-50 p-4 text-sm">
                             <div className="mb-2 font-semibold text-slate-700">목표 판매가</div>
@@ -786,29 +853,18 @@ export default function App() {
             </div>
           </div>
 
-          {/* DB 저장 기록 */}
+          {/* 저장 기록 */}
           <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-lg font-bold">저장 기록</h2>
               <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={loadRecords}
-                  disabled={isLoadingRecords}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
-                >
-                  <RefreshCw className={`h-4 w-4 ${isLoadingRecords ? "animate-spin" : ""}`} />
-                  새로고침
+                <button onClick={loadRecords} disabled={isLoadingRecords} className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60">
+                  <RefreshCw className={`h-4 w-4 ${isLoadingRecords ? "animate-spin" : ""}`} /> 새로고침
                 </button>
-                <button
-                  onClick={() => exportToCsv(filteredRecords)}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-                >
+                <button onClick={() => exportToCsv(filteredRecords)} className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
                   <Download className="h-4 w-4" /> CSV
                 </button>
-                <button
-                  onClick={() => exportToXlsx(filteredRecords)}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-                >
+                <button onClick={() => exportToXlsx(filteredRecords)} className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
                   <Download className="h-4 w-4" /> XLSX
                 </button>
               </div>
@@ -827,26 +883,20 @@ export default function App() {
 
             <div className="space-y-3">
               {isLoadingRecords ? (
-                <div className="rounded-2xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">
-                  불러오는 중...
-                </div>
+                <div className="rounded-2xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">불러오는 중...</div>
               ) : filteredRecords.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">
-                  저장된 기록이 없습니다.
-                </div>
+                <div className="rounded-2xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">저장된 기록이 없습니다.</div>
               ) : (
                 filteredRecords.map((record) => {
                   const expanded = !!expandedIds[record.id];
                   return (
                     <div key={record.id} className="rounded-2xl border border-slate-200">
-                      {/* 기록 헤더 */}
                       <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
                         <div className="min-w-0">
                           <div className="font-bold text-slate-900 truncate">{record.bundleName}</div>
                           <div className="mt-1 text-xs text-slate-500">
                             매입일 {record.purchaseDate} · 저장일 {record.savedAt}
                           </div>
-                          {/* 요약 수치 항상 보임 */}
                           <div className="mt-2 flex flex-wrap gap-3 text-sm">
                             <span className="text-slate-600">수량 <strong>{formatNumber(record.summary.totalQty)}개</strong></span>
                             <span className="text-slate-600">매출 <strong>{formatNumber(record.summary.totalRevenue)}원</strong></span>
@@ -856,29 +906,19 @@ export default function App() {
                           </div>
                         </div>
                         <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => toggleExpand(record.id)}
-                            className="inline-flex items-center gap-1 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-                          >
+                          <button onClick={() => toggleExpand(record.id)} className="inline-flex items-center gap-1 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
                             {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                             {expanded ? "접기" : "상세"}
                           </button>
-                          <button
-                            onClick={() => editRecord(record.id)}
-                            className="inline-flex items-center gap-1 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-                          >
+                          <button onClick={() => editRecord(record.id)} className="inline-flex items-center gap-1 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
                             <Edit3 className="h-4 w-4" /> 수정
                           </button>
-                          <button
-                            onClick={() => deleteRecord(record.id)}
-                            className="inline-flex items-center gap-1 rounded-2xl border border-rose-200 px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50"
-                          >
+                          <button onClick={() => deleteRecord(record.id)} className="inline-flex items-center gap-1 rounded-2xl border border-rose-200 px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50">
                             <Trash2 className="h-4 w-4" /> 삭제
                           </button>
                         </div>
                       </div>
 
-                      {/* 상세 펼침 */}
                       {expanded && (
                         <div className="border-t border-slate-100 p-4">
                           <div className="overflow-hidden rounded-2xl border border-slate-200">
@@ -887,9 +927,9 @@ export default function App() {
                                 <thead className="bg-slate-50 text-slate-600">
                                   <tr>
                                     <th className="px-4 py-3 text-left">상품명</th>
-                                    <th className="px-4 py-3 text-left">SKU</th>
                                     <th className="px-4 py-3 text-right">수량</th>
                                     <th className="px-4 py-3 text-right">판매가</th>
+                                    <th className="px-4 py-3 text-right">매입원가</th>
                                     <th className="px-4 py-3 text-right">개당원가</th>
                                     <th className="px-4 py-3 text-right">원가율</th>
                                     <th className="px-4 py-3 text-right">마진율</th>
@@ -898,10 +938,15 @@ export default function App() {
                                 <tbody>
                                   {record.items.map((item) => (
                                     <tr key={item.id} className="border-t border-slate-100">
-                                      <td className="px-4 py-3">{item.name}</td>
-                                      <td className="px-4 py-3 text-slate-500">{item.sku || "-"}</td>
+                                      <td className="px-4 py-3">
+                                        <div>{item.name}</div>
+                                        {item.buyKrw > 0 && (
+                                          <div className="text-xs text-amber-600 mt-0.5">실결제 {formatNumber(item.buyKrw)}원</div>
+                                        )}
+                                      </td>
                                       <td className="px-4 py-3 text-right">{formatNumber(item.qty)}</td>
                                       <td className="px-4 py-3 text-right">{formatNumber(item.salePrice)}원</td>
+                                      <td className="px-4 py-3 text-right">{formatNumber(item.unitBuyCostKrw)}원</td>
                                       <td className="px-4 py-3 text-right">{formatNumber(item.totalCostPerUnit)}원</td>
                                       <td className="px-4 py-3 text-right">{formatPercent(item.costRate)}</td>
                                       <td className="px-4 py-3 text-right font-medium text-emerald-600">{formatPercent(item.marginRate)}</td>
