@@ -61,7 +61,6 @@ function makeEmptyProduct(index = 1) {
     qty: "1",
     buyUsd: "0",
     buyCny: "0",
-    buyKrw: "0",       // ← 실제 원화 결제액 추가
     salePrice: "0",
     salesStatus: "미판매",
     restockStatus: "보통",
@@ -78,7 +77,6 @@ function makeSampleProducts() {
       qty: "2",
       buyUsd: "0",
       buyCny: "13",
-      buyKrw: "0",
       salePrice: "29900",
       salesStatus: "판매중",
       restockStatus: "보통",
@@ -91,7 +89,6 @@ function makeSampleProducts() {
       qty: "2",
       buyUsd: "0",
       buyCny: "18",
-      buyKrw: "0",
       salePrice: "34900",
       salesStatus: "미판매",
       restockStatus: "재주문 필요",
@@ -109,35 +106,49 @@ function calculateRows(products, shared) {
   const smartStoreFeeRate = toNumber(shared.smartStoreFeeRate) / 100;
   const adCostRate = toNumber(shared.adCostRate) / 100;
   const simpleVatRate = toNumber(shared.simpleVatRate) / 100;
+  const actualTotalKrw = toNumber(shared.actualTotalKrw); // 묶음 전체 실제 결제액
 
+  // 1단계: 각 상품의 CNY 기준 총 매입금액 계산
   const baseRows = products.map((item) => {
     const qty = Math.max(1, toNumber(item.qty));
     const buyUsd = toNumber(item.buyUsd);
     const buyCny = toNumber(item.buyCny);
-    const buyKrw = toNumber(item.buyKrw);
     const salePrice = toNumber(item.salePrice);
-
-    // 실제 원화 결제액이 입력된 경우 우선 사용, 없으면 USD/CNY 환산
-    const calculatedBuyCostKrw = buyUsd * usdRate + buyCny * cnyRate;
-    const unitBuyCostKrw = buyKrw > 0 ? buyKrw : calculatedBuyCostKrw;
+    const unitBuyCostKrw = buyUsd * usdRate + buyCny * cnyRate;
     const totalBuyCostKrw = unitBuyCostKrw * qty;
-
-    // 환산 차이 (실제 - 계산)
-    const krwDiff = buyKrw > 0 ? buyKrw - calculatedBuyCostKrw : 0;
-
-    return {
-      ...item, qty, buyUsd, buyCny, buyKrw, salePrice,
-      unitBuyCostKrw, totalBuyCostKrw, calculatedBuyCostKrw, krwDiff,
-    };
+    return { ...item, qty, buyUsd, buyCny, salePrice, unitBuyCostKrw, totalBuyCostKrw };
   });
 
-  const totalQty = baseRows.reduce((sum, row) => sum + row.qty, 0);
-  const totalBuyCost = baseRows.reduce((sum, row) => sum + row.totalBuyCostKrw, 0);
+  // 2단계: 전체 환산 매입금액 합계
+  const totalCalcBuyCost = baseRows.reduce((sum, row) => sum + row.totalBuyCostKrw, 0);
+
+  // 3단계: 실제 결제액이 있으면 비율로 배분
+  const baseRowsWithActual = baseRows.map((row) => {
+    if (actualTotalKrw > 0 && totalCalcBuyCost > 0) {
+      // 이 상품의 비중
+      const ratio = row.totalBuyCostKrw / totalCalcBuyCost;
+      // 실제 결제액에서 이 상품이 차지하는 금액
+      const actualTotalForThisProduct = actualTotalKrw * ratio;
+      // 개당 실제 원가
+      const actualUnitKrw = row.qty > 0 ? actualTotalForThisProduct / row.qty : 0;
+      return {
+        ...row,
+        unitBuyCostKrw: actualUnitKrw,
+        totalBuyCostKrw: actualTotalForThisProduct,
+        calculatedUnitKrw: row.unitBuyCostKrw, // 환산 원가 (참고용)
+        ratio,
+      };
+    }
+    return { ...row, calculatedUnitKrw: row.unitBuyCostKrw, ratio: 0 };
+  });
+
+  const totalQty = baseRowsWithActual.reduce((sum, row) => sum + row.qty, 0);
+  const totalBuyCost = baseRowsWithActual.reduce((sum, row) => sum + row.totalBuyCostKrw, 0);
   const domesticPerUnit = totalQty > 0 ? domesticShipping / totalQty : 0;
   const packagingPerUnit = totalQty > 0 ? packagingCost / totalQty : 0;
   const fixedAdPerUnit = totalQty > 0 ? adCostFixed / totalQty : 0;
 
-  const rows = baseRows.map((row) => {
+  const rows = baseRowsWithActual.map((row) => {
     const buyRatio = totalBuyCost > 0 ? row.totalBuyCostKrw / totalBuyCost : 0;
     const overseasAllocatedTotal = overseasShipping * buyRatio;
     const overseasAllocatedPerUnit = row.qty > 0 ? overseasAllocatedTotal / row.qty : 0;
@@ -184,7 +195,7 @@ function calculateRows(products, shared) {
 function exportToCsv(records) {
   const headers = [
     "묶음명","매입일","저장일","상품명","SKU","판매상태","재주문상태",
-    "수량","판매가","개당매입원가(실제)","개당환산원가","원화차이","개당총원가",
+    "수량","판매가","개당매입원가","개당환산원가","개당총원가",
     "총매출","총원가","개당순이익","총순이익","원가율","마진율","이미지URL",
   ];
   const lines = [headers.join(",")];
@@ -196,8 +207,7 @@ function exportToCsv(records) {
           item.name, item.sku || "", item.salesStatus || "미판매",
           item.restockStatus || "보통", item.qty, item.salePrice,
           Math.round(item.unitBuyCostKrw),
-          Math.round(item.calculatedBuyCostKrw || 0),
-          Math.round(item.krwDiff || 0),
+          Math.round(item.calculatedUnitKrw || 0),
           Math.round(item.totalCostPerUnit),
           Math.round(item.revenueAll), Math.round(item.totalCostAll),
           Math.round(item.profitPerUnit), Math.round(item.profitAll),
@@ -229,9 +239,8 @@ function exportToXlsx(records) {
       판매상태: item.salesStatus || "미판매",
       재주문상태: item.restockStatus || "보통",
       수량: item.qty, 판매가: Math.round(item.salePrice),
-      개당매입원가실제: Math.round(item.unitBuyCostKrw),
-      개당환산원가: Math.round(item.calculatedBuyCostKrw || 0),
-      원화차이: Math.round(item.krwDiff || 0),
+      개당실제원가: Math.round(item.unitBuyCostKrw),
+      개당환산원가: Math.round(item.calculatedUnitKrw || 0),
       개당총원가: Math.round(item.totalCostPerUnit),
       총매출: Math.round(item.revenueAll), 총원가: Math.round(item.totalCostAll),
       개당순이익: Math.round(item.profitPerUnit), 총순이익: Math.round(item.profitAll),
@@ -250,13 +259,11 @@ function mapDbBundleToUi(bundle) {
     id: item.id, name: item.name ?? "", sku: item.sku ?? "",
     imageUrl: item.image_url ?? "", qty: item.qty ?? 1,
     buyUsd: item.buy_usd ?? 0, buyCny: item.buy_cny ?? 0,
-    buyKrw: item.buy_krw ?? 0,
     salePrice: item.sale_price ?? 0,
     salesStatus: item.sales_status ?? "미판매",
     restockStatus: item.restock_status ?? "보통",
     unitBuyCostKrw: item.unit_buy_cost_krw ?? 0,
-    calculatedBuyCostKrw: item.calculated_buy_cost_krw ?? 0,
-    krwDiff: item.krw_diff ?? 0,
+    calculatedUnitKrw: item.calculated_buy_cost_krw ?? 0,
     totalBuyCostKrw: item.total_buy_cost_krw ?? 0,
     buyRatio: item.buy_ratio ?? 0,
     overseasAllocatedTotal: item.overseas_allocated_total ?? 0,
@@ -288,13 +295,13 @@ function mapDbBundleToUi(bundle) {
       smartStoreFeeRate: String(bundle.smartstore_fee_rate ?? 0),
       adCostRate: String(bundle.ad_cost_rate ?? 0),
       simpleVatRate: String(bundle.simple_vat_rate ?? 0),
+      actualTotalKrw: String(bundle.actual_total_krw ?? 0),
     },
     items,
     sourceProducts: items.map((item) => ({
       id: item.id || uid(), name: item.name, sku: item.sku,
       imageUrl: item.imageUrl, qty: String(item.qty ?? 1),
       buyUsd: String(item.buyUsd ?? 0), buyCny: String(item.buyCny ?? 0),
-      buyKrw: String(item.buyKrw ?? 0),
       salePrice: String(item.salePrice ?? 0),
       salesStatus: item.salesStatus ?? "미판매",
       restockStatus: item.restockStatus ?? "보통",
@@ -374,6 +381,7 @@ export default function App() {
   const [smartStoreFeeRate, setSmartStoreFeeRate] = useState("2");
   const [adCostRate, setAdCostRate] = useState("3");
   const [simpleVatRate, setSimpleVatRate] = useState("15");
+  const [actualTotalKrw, setActualTotalKrw] = useState("0"); // ← 묶음 전체 실제 결제액
 
   const [products, setProducts] = useState(makeSampleProducts());
   const [savedRecords, setSavedRecords] = useState([]);
@@ -389,10 +397,20 @@ export default function App() {
 
   const sharedInput = useMemo(() => ({
     usdRate, cnyRate, overseasShipping, domesticShipping, packagingCost,
-    adCostFixed, smartStoreFeeRate, adCostRate, simpleVatRate,
-  }), [usdRate, cnyRate, overseasShipping, domesticShipping, packagingCost, adCostFixed, smartStoreFeeRate, adCostRate, simpleVatRate]);
+    adCostFixed, smartStoreFeeRate, adCostRate, simpleVatRate, actualTotalKrw,
+  }), [usdRate, cnyRate, overseasShipping, domesticShipping, packagingCost,
+      adCostFixed, smartStoreFeeRate, adCostRate, simpleVatRate, actualTotalKrw]);
 
   const result = useMemo(() => calculateRows(products, sharedInput), [products, sharedInput]);
+
+  // 환산 총액 계산 (참고용)
+  const calcTotalKrw = useMemo(() => {
+    return products.reduce((sum, p) => {
+      const qty = Math.max(1, toNumber(p.qty));
+      const unitKrw = toNumber(p.buyUsd) * toNumber(usdRate) + toNumber(p.buyCny) * toNumber(cnyRate);
+      return sum + unitKrw * qty;
+    }, 0);
+  }, [products, usdRate, cnyRate]);
 
   const filteredRecords = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase();
@@ -454,6 +472,7 @@ export default function App() {
     setOverseasShipping("22000"); setDomesticShipping("4000");
     setPackagingCost("6000"); setAdCostFixed("3000");
     setSmartStoreFeeRate("2"); setAdCostRate("3"); setSimpleVatRate("15");
+    setActualTotalKrw("0");
     setProducts(makeSampleProducts());
     setEditingRecordId(null);
     setDbMessage("");
@@ -479,6 +498,7 @@ export default function App() {
     packaging_cost: toNumber(packagingCost), ad_cost_fixed: toNumber(adCostFixed),
     smartstore_fee_rate: toNumber(smartStoreFeeRate), ad_cost_rate: toNumber(adCostRate),
     simple_vat_rate: toNumber(simpleVatRate),
+    actual_total_krw: toNumber(actualTotalKrw),
     total_qty: Math.round(toNumber(result.summary.totalQty)),
     total_buy_cost: toNumber(result.summary.totalBuyCost),
     total_revenue: toNumber(result.summary.totalRevenue),
@@ -493,13 +513,11 @@ export default function App() {
       bundle_id: bundleId, name: row.name || "", sku: row.sku || "",
       image_url: row.imageUrl || "", qty: Math.round(toNumber(row.qty)),
       buy_usd: toNumber(row.buyUsd), buy_cny: toNumber(row.buyCny),
-      buy_krw: toNumber(row.buyKrw),
       sale_price: toNumber(row.salePrice),
       sales_status: row.salesStatus || "미판매",
       restock_status: row.restockStatus || "보통",
       unit_buy_cost_krw: toNumber(row.unitBuyCostKrw),
-      calculated_buy_cost_krw: toNumber(row.calculatedBuyCostKrw),
-      krw_diff: toNumber(row.krwDiff),
+      calculated_buy_cost_krw: toNumber(row.calculatedUnitKrw),
       total_buy_cost_krw: toNumber(row.totalBuyCostKrw),
       buy_ratio: toNumber(row.buyRatio),
       overseas_allocated_total: toNumber(row.overseasAllocatedTotal),
@@ -570,6 +588,7 @@ export default function App() {
     setSmartStoreFeeRate(record.sharedInput.smartStoreFeeRate || "0");
     setAdCostRate(record.sharedInput.adCostRate || "0");
     setSimpleVatRate(record.sharedInput.simpleVatRate || "15");
+    setActualTotalKrw(record.sharedInput.actualTotalKrw || "0");
     setProducts((record.sourceProducts || []).map((item) => ({ ...item, id: item.id || uid() })));
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -592,6 +611,9 @@ export default function App() {
 
   const toggleExpand = (id) => setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
   const toggleResult = (id) => setExpandedResults((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  const hasActualKrw = toNumber(actualTotalKrw) > 0;
+  const krwDiff = hasActualKrw ? toNumber(actualTotalKrw) - calcTotalKrw : 0;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -666,6 +688,39 @@ export default function App() {
               <InputField label="광고비율" value={adCostRate} onChange={setAdCostRate} suffix="%" />
               <InputField label="간이과세 부가가치율" value={simpleVatRate} onChange={setSimpleVatRate} suffix="%" />
             </div>
+
+            {/* 실제 결제액 섹션 */}
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <div className="mb-3 text-sm font-bold text-amber-800">
+                💳 묶음 전체 실제 결제액 (알리바바 등 실제 결제 금액)
+              </div>
+              <div className="grid gap-3 grid-cols-1 sm:grid-cols-3 items-end">
+                <InputField
+                  label="전체 실제 결제액"
+                  value={actualTotalKrw}
+                  onChange={setActualTotalKrw}
+                  suffix="원"
+                  highlight={true}
+                  placeholder="실제 결제 총액 입력"
+                />
+                <div className="rounded-2xl bg-white border border-amber-200 px-4 py-2.5 text-sm">
+                  <div className="text-xs text-slate-500 mb-1">환산 총액 (CNY+USD 기준)</div>
+                  <div className="font-semibold text-slate-700">{formatNumber(calcTotalKrw)}원</div>
+                </div>
+                <div className={`rounded-2xl border px-4 py-2.5 text-sm ${krwDiff > 0 ? "border-rose-200 bg-rose-50" : krwDiff < 0 ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                  <div className="text-xs text-slate-500 mb-1">실제 vs 환산 차이</div>
+                  <div className={`font-semibold ${krwDiff > 0 ? "text-rose-600" : krwDiff < 0 ? "text-emerald-600" : "text-slate-400"}`}>
+                    {hasActualKrw ? `${krwDiff > 0 ? "+" : ""}${formatNumber(krwDiff)}원` : "미입력"}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 text-xs text-amber-700">
+                {hasActualKrw
+                  ? `✅ 실제 결제액 ${formatNumber(toNumber(actualTotalKrw))}원을 각 상품 CNY 비중에 따라 자동 배분 중`
+                  : "💡 알리바바 실제 결제 총액을 입력하면 수수료·환율 차이까지 반영해서 자동 배분돼요"}
+              </div>
+            </div>
+
             <div className="mt-3 rounded-2xl bg-slate-50 px-4 py-2.5 text-xs text-slate-500">
               국제배송비는 매입금액 비율로 배분, 국내배송비·포장비·정액광고비는 전체 수량 기준 균등 배분
             </div>
@@ -681,69 +736,27 @@ export default function App() {
             </div>
 
             <div className="space-y-4">
-              {products.map((product, index) => {
-                const hasKrw = toNumber(product.buyKrw) > 0;
-                const calcKrw = toNumber(product.buyUsd) * toNumber(usdRate) + toNumber(product.buyCny) * toNumber(cnyRate);
-                const diff = hasKrw ? toNumber(product.buyKrw) - calcKrw : 0;
-
-                return (
-                  <div key={product.id} className="rounded-2xl border border-slate-200 p-4">
-                    <div className="mb-3 flex items-center justify-between">
-                      <div className="text-sm font-semibold text-slate-700">상품 {index + 1}</div>
-                      <button onClick={() => removeProduct(product.id)} className="inline-flex items-center gap-1 text-sm text-rose-500 transition hover:text-rose-600">
-                        <Trash2 className="h-4 w-4" /> 삭제
-                      </button>
-                    </div>
-
-                    <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
-                      <InputField label="상품명" value={product.name} onChange={(v) => updateProduct(product.id, "name", v)} placeholder="상품명" />
-                      <InputField label="SKU" value={product.sku} onChange={(v) => updateProduct(product.id, "sku", v)} placeholder="SKU" />
-                      <InputField label="이미지 URL" value={product.imageUrl} onChange={(v) => updateProduct(product.id, "imageUrl", v)} placeholder="https://..." />
-                      <InputField label="수량" value={product.qty} onChange={(v) => updateProduct(product.id, "qty", v)} suffix="개" />
-                      <InputField label="개당 매입가 (USD)" value={product.buyUsd} onChange={(v) => updateProduct(product.id, "buyUsd", v)} suffix="$" />
-                      <InputField label="개당 매입가 (CNY)" value={product.buyCny} onChange={(v) => updateProduct(product.id, "buyCny", v)} suffix="¥" />
-                      <InputField label="판매가" value={product.salePrice} onChange={(v) => updateProduct(product.id, "salePrice", v)} suffix="원" />
-                      <SelectField label="판매 상태" value={product.salesStatus} onChange={(v) => updateProduct(product.id, "salesStatus", v)} options={["미판매", "판매중", "판매완료"]} />
-                    </div>
-
-                    {/* 실제 원화 결제액 섹션 */}
-                    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
-                      <div className="mb-2 text-xs font-semibold text-amber-800">
-                        💳 실제 원화 결제액 (선택)
-                      </div>
-                      <div className="grid gap-3 grid-cols-1 sm:grid-cols-3 items-end">
-                        <InputField
-                          label="개당 실제 결제액 (원화)"
-                          value={product.buyKrw}
-                          onChange={(v) => updateProduct(product.id, "buyKrw", v)}
-                          suffix="원"
-                          highlight={true}
-                          placeholder="직접 입력 (없으면 0)"
-                        />
-                        <div className="rounded-2xl bg-white border border-amber-200 px-4 py-2.5 text-sm">
-                          <div className="text-xs text-slate-500 mb-1">환산 원가 (USD+CNY)</div>
-                          <div className="font-semibold text-slate-700">{formatNumber(calcKrw)}원</div>
-                        </div>
-                        <div className={`rounded-2xl border px-4 py-2.5 text-sm ${diff > 0 ? "border-rose-200 bg-rose-50" : diff < 0 ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
-                          <div className="text-xs text-slate-500 mb-1">실제 vs 환산 차이</div>
-                          <div className={`font-semibold ${diff > 0 ? "text-rose-600" : diff < 0 ? "text-emerald-600" : "text-slate-400"}`}>
-                            {hasKrw ? `${diff > 0 ? "+" : ""}${formatNumber(diff)}원` : "미입력"}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="mt-2 text-xs text-amber-700">
-                        {hasKrw
-                          ? "✅ 실제 결제액으로 원가 계산 중 (수수료·환율 차이 반영됨)"
-                          : "💡 알리페이·위챗페이 실제 결제액 입력 시 수수료·환율 차이까지 반영돼요"}
-                      </div>
-                    </div>
-
-                    <div className="mt-3 grid gap-3 grid-cols-1">
-                      <SelectField label="재주문 상태" value={product.restockStatus} onChange={(v) => updateProduct(product.id, "restockStatus", v)} options={["보통", "재주문 필요", "재주문 완료"]} />
-                    </div>
+              {products.map((product, index) => (
+                <div key={product.id} className="rounded-2xl border border-slate-200 p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-700">상품 {index + 1}</div>
+                    <button onClick={() => removeProduct(product.id)} className="inline-flex items-center gap-1 text-sm text-rose-500 transition hover:text-rose-600">
+                      <Trash2 className="h-4 w-4" /> 삭제
+                    </button>
                   </div>
-                );
-              })}
+                  <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
+                    <InputField label="상품명" value={product.name} onChange={(v) => updateProduct(product.id, "name", v)} placeholder="상품명" />
+                    <InputField label="SKU" value={product.sku} onChange={(v) => updateProduct(product.id, "sku", v)} placeholder="SKU" />
+                    <InputField label="이미지 URL" value={product.imageUrl} onChange={(v) => updateProduct(product.id, "imageUrl", v)} placeholder="https://..." />
+                    <InputField label="수량" value={product.qty} onChange={(v) => updateProduct(product.id, "qty", v)} suffix="개" />
+                    <InputField label="개당 매입가 (USD)" value={product.buyUsd} onChange={(v) => updateProduct(product.id, "buyUsd", v)} suffix="$" />
+                    <InputField label="개당 매입가 (CNY)" value={product.buyCny} onChange={(v) => updateProduct(product.id, "buyCny", v)} suffix="¥" />
+                    <InputField label="판매가" value={product.salePrice} onChange={(v) => updateProduct(product.id, "salePrice", v)} suffix="원" />
+                    <SelectField label="판매 상태" value={product.salesStatus} onChange={(v) => updateProduct(product.id, "salesStatus", v)} options={["미판매", "판매중", "판매완료"]} />
+                    <SelectField label="재주문 상태" value={product.restockStatus} onChange={(v) => updateProduct(product.id, "restockStatus", v)} options={["보통", "재주문 필요", "재주문 완료"]} />
+                  </div>
+                </div>
+              ))}
             </div>
 
             <div className="mt-4">
@@ -761,6 +774,11 @@ export default function App() {
           {/* 계산 결과 */}
           <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="mb-4 text-lg font-bold">현재 계산 결과</h2>
+            {hasActualKrw && (
+              <div className="mb-3 rounded-2xl bg-amber-50 border border-amber-200 px-4 py-2.5 text-xs text-amber-800">
+                💳 실제 결제액 {formatNumber(toNumber(actualTotalKrw))}원 기준으로 계산 중
+              </div>
+            )}
             <div className="space-y-3">
               {result.rows.map((row) => {
                 const isExpanded = !!expandedResults[row.id];
@@ -783,7 +801,7 @@ export default function App() {
                           <div className="flex flex-wrap gap-2 text-xs text-slate-500 mt-0.5">
                             <span className="flex items-center gap-1"><Tag className="h-3 w-3" />{row.sku || "SKU 없음"}</span>
                             <span className="flex items-center gap-1"><CheckCircle2 className="h-3 w-3" />{row.salesStatus || "미판매"}</span>
-                            {row.buyKrw > 0 && (
+                            {hasActualKrw && (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">실결제 반영</span>
                             )}
                           </div>
@@ -804,29 +822,23 @@ export default function App() {
                           <div className="rounded-2xl bg-slate-50 p-4 text-sm">
                             <div className="mb-2 font-semibold text-slate-700">개당 비용 요약</div>
                             <div className="flex justify-between py-1">
-                              <span className="text-slate-600">환산 매입원가</span>
-                              <span className="text-slate-500">{formatNumber(row.calculatedBuyCostKrw)}원</span>
+                              <span className="text-slate-500">CNY 환산 원가</span>
+                              <span className="text-slate-500">{formatNumber(row.calculatedUnitKrw)}원</span>
                             </div>
-                            {row.buyKrw > 0 && (
+                            {hasActualKrw && (
                               <>
                                 <div className="flex justify-between py-1">
-                                  <span className="text-amber-700 font-medium">실제 결제액</span>
-                                  <strong className="text-amber-700">{formatNumber(row.buyKrw)}원</strong>
+                                  <span className="text-amber-700 font-medium">실제 배분 원가</span>
+                                  <strong className="text-amber-700">{formatNumber(row.unitBuyCostKrw)}원</strong>
                                 </div>
-                                <div className="flex justify-between py-1">
-                                  <span className="text-slate-600">수수료·환율 차이</span>
-                                  <span className={row.krwDiff > 0 ? "text-rose-600" : "text-emerald-600"}>
-                                    {row.krwDiff > 0 ? "+" : ""}{formatNumber(row.krwDiff)}원
-                                  </span>
+                                <div className="flex justify-between py-1 text-xs text-slate-500">
+                                  <span>이 상품 비중</span>
+                                  <span>{formatPercent((row.ratio || 0) * 100)}</span>
                                 </div>
                               </>
                             )}
                             <div className="flex justify-between py-1 border-t border-slate-200 mt-1 pt-2">
-                              <span className="font-medium">개당 매입원가 (적용)</span>
-                              <strong>{formatNumber(row.unitBuyCostKrw)}원</strong>
-                            </div>
-                            <div className="flex justify-between py-1">
-                              <span>개당 총원가</span>
+                              <span className="font-medium">개당 총원가</span>
                               <strong>{formatNumber(row.totalCostPerUnit)}원</strong>
                             </div>
                             <div className="flex justify-between py-1">
@@ -929,7 +941,6 @@ export default function App() {
                                     <th className="px-4 py-3 text-left">상품명</th>
                                     <th className="px-4 py-3 text-right">수량</th>
                                     <th className="px-4 py-3 text-right">판매가</th>
-                                    <th className="px-4 py-3 text-right">매입원가</th>
                                     <th className="px-4 py-3 text-right">개당원가</th>
                                     <th className="px-4 py-3 text-right">원가율</th>
                                     <th className="px-4 py-3 text-right">마진율</th>
@@ -938,16 +949,10 @@ export default function App() {
                                 <tbody>
                                   {record.items.map((item) => (
                                     <tr key={item.id} className="border-t border-slate-100">
-                                      <td className="px-4 py-3">
-                                        <div>{item.name}</div>
-                                        {item.buyKrw > 0 && (
-                                          <div className="text-xs text-amber-600 mt-0.5">실결제 {formatNumber(item.buyKrw)}원</div>
-                                        )}
-                                      </td>
+                                      <td className="px-4 py-3">{item.name}</td>
                                       <td className="px-4 py-3 text-right">{formatNumber(item.qty)}</td>
                                       <td className="px-4 py-3 text-right">{formatNumber(item.salePrice)}원</td>
                                       <td className="px-4 py-3 text-right">{formatNumber(item.unitBuyCostKrw)}원</td>
-                                      <td className="px-4 py-3 text-right">{formatNumber(item.totalCostPerUnit)}원</td>
                                       <td className="px-4 py-3 text-right">{formatPercent(item.costRate)}</td>
                                       <td className="px-4 py-3 text-right font-medium text-emerald-600">{formatPercent(item.marginRate)}</td>
                                     </tr>
