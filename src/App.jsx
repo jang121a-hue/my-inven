@@ -18,6 +18,11 @@ import {
   Tag,
   CheckCircle2,
   Image as ImageIcon,
+  Copy,
+  X,
+  CheckSquare,
+  Square,
+  FolderOpen,
 } from "lucide-react";
 import { supabase } from "./lib/supabase.js";
 
@@ -96,6 +101,43 @@ function makeSampleProducts() {
   ];
 }
 
+// 복사 옵션 기본값
+const DEFAULT_COPY_OPTIONS = {
+  name: true,        // 상품명
+  sku: true,         // SKU
+  imageUrl: true,    // 이미지 URL
+  buyUsd: true,      // 매입가 USD
+  buyCny: true,      // 매입가 CNY
+  salePrice: true,   // 판매가
+  qty: false,        // 수량 (기본 미선택)
+  salesStatus: false, // 판매 상태 (기본 미선택)
+  restockStatus: false, // 재주문 상태 (기본 미선택)
+};
+
+const COPY_OPTION_LABELS = {
+  name: "상품명",
+  sku: "SKU",
+  imageUrl: "이미지 URL",
+  buyUsd: "매입가 (USD)",
+  buyCny: "매입가 (CNY)",
+  salePrice: "판매가",
+  qty: "수량",
+  salesStatus: "판매 상태",
+  restockStatus: "재주문 상태",
+};
+
+// 선택한 옵션만 적용해서 새 상품으로 만들기
+function makeProductFromSource(source, options) {
+  const empty = makeEmptyProduct(1);
+  const result = { ...empty, id: uid() };
+  Object.keys(options).forEach((key) => {
+    if (options[key] && source[key] !== undefined && source[key] !== null) {
+      result[key] = source[key];
+    }
+  });
+  return result;
+}
+
 function calculateRows(products, shared) {
   const usdRate = toNumber(shared.usdRate);
   const cnyRate = toNumber(shared.cnyRate);
@@ -106,9 +148,8 @@ function calculateRows(products, shared) {
   const smartStoreFeeRate = toNumber(shared.smartStoreFeeRate) / 100;
   const adCostRate = toNumber(shared.adCostRate) / 100;
   const simpleVatRate = toNumber(shared.simpleVatRate) / 100;
-  const actualTotalKrw = toNumber(shared.actualTotalKrw); // 묶음 전체 실제 결제액
+  const actualTotalKrw = toNumber(shared.actualTotalKrw);
 
-  // 1단계: 각 상품의 CNY 기준 총 매입금액 계산
   const baseRows = products.map((item) => {
     const qty = Math.max(1, toNumber(item.qty));
     const buyUsd = toNumber(item.buyUsd);
@@ -119,23 +160,18 @@ function calculateRows(products, shared) {
     return { ...item, qty, buyUsd, buyCny, salePrice, unitBuyCostKrw, totalBuyCostKrw };
   });
 
-  // 2단계: 전체 환산 매입금액 합계
   const totalCalcBuyCost = baseRows.reduce((sum, row) => sum + row.totalBuyCostKrw, 0);
 
-  // 3단계: 실제 결제액이 있으면 비율로 배분
   const baseRowsWithActual = baseRows.map((row) => {
     if (actualTotalKrw > 0 && totalCalcBuyCost > 0) {
-      // 이 상품의 비중
       const ratio = row.totalBuyCostKrw / totalCalcBuyCost;
-      // 실제 결제액에서 이 상품이 차지하는 금액
       const actualTotalForThisProduct = actualTotalKrw * ratio;
-      // 개당 실제 원가
       const actualUnitKrw = row.qty > 0 ? actualTotalForThisProduct / row.qty : 0;
       return {
         ...row,
         unitBuyCostKrw: actualUnitKrw,
         totalBuyCostKrw: actualTotalForThisProduct,
-        calculatedUnitKrw: row.unitBuyCostKrw, // 환산 원가 (참고용)
+        calculatedUnitKrw: row.unitBuyCostKrw,
         ratio,
       };
     }
@@ -271,7 +307,7 @@ function mapDbBundleToUi(bundle) {
     domesticPerUnit: item.domestic_per_unit ?? 0,
     packagingPerUnit: item.packaging_per_unit ?? 0,
     fixedAdPerUnit: item.fixed_ad_per_unit ?? 0,
-    smartStoreFeePerUnit: item.smartstore_fee_per_unit ?? 0,
+    smartstoreFeePerUnit: item.smartstore_fee_per_unit ?? 0,
     adCostPerUnit: item.ad_cost_per_unit ?? 0,
     simpleVatPerUnit: item.simple_vat_per_unit ?? 0,
     totalCostPerUnit: item.total_cost_per_unit ?? 0,
@@ -367,6 +403,347 @@ function SummaryCard({ title, value, sub, icon: Icon }) {
   );
 }
 
+// 상품 가져오기 모달
+function ImportProductsModal({ isOpen, onClose, savedRecords, onImport }) {
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [expandedBundleId, setExpandedBundleId] = useState(null);
+  const [selectedItemIds, setSelectedItemIds] = useState({}); // { bundleId: { itemId: true } }
+  const [copyOptions, setCopyOptions] = useState(DEFAULT_COPY_OPTIONS);
+  const [importMode, setImportMode] = useState("replace"); // "replace" or "append"
+
+  // 모달 열릴 때 상태 초기화
+  useEffect(() => {
+    if (isOpen) {
+      setSearchKeyword("");
+      setExpandedBundleId(null);
+      setSelectedItemIds({});
+      setCopyOptions(DEFAULT_COPY_OPTIONS);
+      setImportMode("replace");
+    }
+  }, [isOpen]);
+
+  const filteredRecords = useMemo(() => {
+    const keyword = searchKeyword.trim().toLowerCase();
+    if (!keyword) return savedRecords;
+    return savedRecords.filter((record) => {
+      const target = [
+        record.bundleName, record.purchaseDate,
+        ...(record.sourceProducts || []).flatMap((item) => [item.name, item.sku]),
+      ].join(" ").toLowerCase();
+      return target.includes(keyword);
+    });
+  }, [savedRecords, searchKeyword]);
+
+  const toggleItemSelection = (bundleId, itemId) => {
+    setSelectedItemIds((prev) => {
+      const bundleSel = { ...(prev[bundleId] || {}) };
+      if (bundleSel[itemId]) {
+        delete bundleSel[itemId];
+      } else {
+        bundleSel[itemId] = true;
+      }
+      return { ...prev, [bundleId]: bundleSel };
+    });
+  };
+
+  const toggleBundleAll = (bundle) => {
+    const bundleSel = selectedItemIds[bundle.id] || {};
+    const allSelected = bundle.sourceProducts.every((p) => bundleSel[p.id]);
+    setSelectedItemIds((prev) => {
+      if (allSelected) {
+        const next = { ...prev };
+        delete next[bundle.id];
+        return next;
+      }
+      const newSel = {};
+      bundle.sourceProducts.forEach((p) => {
+        newSel[p.id] = true;
+      });
+      return { ...prev, [bundle.id]: newSel };
+    });
+  };
+
+  const toggleCopyOption = (key) => {
+    setCopyOptions((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const totalSelectedCount = useMemo(() => {
+    return Object.values(selectedItemIds).reduce(
+      (sum, bundleSel) => sum + Object.keys(bundleSel || {}).length, 0
+    );
+  }, [selectedItemIds]);
+
+  const handleImport = () => {
+    const productsToImport = [];
+    Object.entries(selectedItemIds).forEach(([bundleId, itemSel]) => {
+      const bundle = savedRecords.find((b) => b.id === bundleId);
+      if (!bundle) return;
+      bundle.sourceProducts.forEach((source) => {
+        if (itemSel[source.id]) {
+          productsToImport.push(makeProductFromSource(source, copyOptions));
+        }
+      });
+    });
+    if (productsToImport.length === 0) {
+      alert("가져올 상품을 선택해 주세요.");
+      return;
+    }
+    onImport(productsToImport, importMode);
+    onClose();
+  };
+
+  const handleImportWholeBundle = (bundle) => {
+    const productsToImport = bundle.sourceProducts.map((source) =>
+      makeProductFromSource(source, copyOptions)
+    );
+    onImport(productsToImport, importMode);
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
+      <div className="flex h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] bg-white shadow-2xl">
+        {/* 헤더 */}
+        <div className="flex items-center justify-between border-b border-slate-100 p-5">
+          <div className="flex items-center gap-2">
+            <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-slate-900 text-white">
+              <FolderOpen className="h-4 w-4" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold">상품 가져오기</h3>
+              <p className="text-xs text-slate-500">저장된 묶음에서 상품 정보를 불러와요</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-full p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* 옵션 영역 */}
+        <div className="border-b border-slate-100 bg-slate-50 p-5 space-y-4">
+          {/* 가져오기 방식 */}
+          <div>
+            <div className="mb-2 text-sm font-semibold text-slate-700">가져오기 방식</div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setImportMode("replace")}
+                className={`flex-1 rounded-2xl border px-4 py-2.5 text-sm font-medium transition ${
+                  importMode === "replace"
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                현재 목록 교체
+              </button>
+              <button
+                onClick={() => setImportMode("append")}
+                className={`flex-1 rounded-2xl border px-4 py-2.5 text-sm font-medium transition ${
+                  importMode === "append"
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                현재 목록에 추가
+              </button>
+            </div>
+          </div>
+
+          {/* 복사할 정보 선택 */}
+          <div>
+            <div className="mb-2 text-sm font-semibold text-slate-700">
+              복사할 정보 선택 <span className="text-xs font-normal text-slate-500">(체크 해제한 항목은 기본값으로 입력됨)</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {Object.keys(COPY_OPTION_LABELS).map((key) => {
+                const checked = copyOptions[key];
+                return (
+                  <button
+                    key={key}
+                    onClick={() => toggleCopyOption(key)}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                      checked
+                        ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                        : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+                    }`}
+                  >
+                    {checked ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
+                    {COPY_OPTION_LABELS[key]}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 검색 */}
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={searchKeyword}
+              onChange={(e) => setSearchKeyword(e.target.value)}
+              placeholder="묶음명, 날짜, 상품명, SKU 검색"
+              className="w-full rounded-2xl border border-slate-200 bg-white py-2.5 pl-11 pr-4 text-sm outline-none shadow-sm"
+            />
+          </div>
+        </div>
+
+        {/* 묶음 목록 */}
+        <div className="flex-1 overflow-y-auto p-5">
+          {filteredRecords.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">
+              {savedRecords.length === 0 ? "저장된 기록이 없습니다." : "검색 결과가 없습니다."}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {filteredRecords.map((bundle) => {
+                const isExpanded = expandedBundleId === bundle.id;
+                const bundleSel = selectedItemIds[bundle.id] || {};
+                const selectedInBundle = Object.keys(bundleSel).length;
+                const totalInBundle = bundle.sourceProducts.length;
+                const allSelected = totalInBundle > 0 && selectedInBundle === totalInBundle;
+
+                return (
+                  <div key={bundle.id} className="rounded-2xl border border-slate-200 overflow-hidden">
+                    {/* 묶음 헤더 */}
+                    <div className="flex flex-col gap-2 p-4 sm:flex-row sm:items-center sm:justify-between">
+                      <button
+                        onClick={() => setExpandedBundleId(isExpanded ? null : bundle.id)}
+                        className="flex flex-1 items-center gap-2 text-left min-w-0"
+                      >
+                        {isExpanded ? (
+                          <ChevronUp className="h-4 w-4 flex-shrink-0 text-slate-400" />
+                        ) : (
+                          <ChevronDown className="h-4 w-4 flex-shrink-0 text-slate-400" />
+                        )}
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-900 truncate">{bundle.bundleName}</div>
+                          <div className="mt-0.5 text-xs text-slate-500">
+                            {bundle.purchaseDate} · 상품 {totalInBundle}개
+                            {selectedInBundle > 0 && (
+                              <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
+                                {selectedInBundle}개 선택됨
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                      <div className="flex flex-shrink-0 gap-2">
+                        <button
+                          onClick={() => handleImportWholeBundle(bundle)}
+                          className="inline-flex items-center gap-1 rounded-2xl bg-slate-900 px-3 py-2 text-xs font-medium text-white transition hover:bg-slate-800"
+                          title="이 묶음 전체를 한 번에 가져오기"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          묶음 전체 가져오기
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 상품 목록 (펼쳤을 때) */}
+                    {isExpanded && (
+                      <div className="border-t border-slate-100 bg-slate-50/50">
+                        {/* 전체 선택 */}
+                        <div className="flex items-center justify-between border-b border-slate-100 bg-white px-4 py-2.5">
+                          <button
+                            onClick={() => toggleBundleAll(bundle)}
+                            className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 hover:text-slate-900"
+                          >
+                            {allSelected ? (
+                              <CheckSquare className="h-4 w-4 text-emerald-600" />
+                            ) : (
+                              <Square className="h-4 w-4 text-slate-400" />
+                            )}
+                            {allSelected ? "전체 해제" : "전체 선택"}
+                          </button>
+                          <span className="text-xs text-slate-500">
+                            {selectedInBundle} / {totalInBundle}개 선택
+                          </span>
+                        </div>
+
+                        {/* 개별 상품 */}
+                        <div className="divide-y divide-slate-100">
+                          {bundle.sourceProducts.map((product) => {
+                            const isSelected = !!bundleSel[product.id];
+                            return (
+                              <button
+                                key={product.id}
+                                onClick={() => toggleItemSelection(bundle.id, product.id)}
+                                className={`flex w-full items-center gap-3 px-4 py-3 text-left transition ${
+                                  isSelected ? "bg-emerald-50/50" : "bg-white hover:bg-slate-50"
+                                }`}
+                              >
+                                <div className="flex-shrink-0">
+                                  {isSelected ? (
+                                    <CheckSquare className="h-5 w-5 text-emerald-600" />
+                                  ) : (
+                                    <Square className="h-5 w-5 text-slate-300" />
+                                  )}
+                                </div>
+                                {product.imageUrl ? (
+                                  <img src={product.imageUrl} alt={product.name} className="h-10 w-10 flex-shrink-0 rounded-xl object-cover" />
+                                ) : (
+                                  <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
+                                    <ImageIcon className="h-4 w-4" />
+                                  </div>
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <div className="font-medium text-slate-900 truncate">{product.name}</div>
+                                  <div className="mt-0.5 flex flex-wrap gap-2 text-xs text-slate-500">
+                                    {product.sku && <span className="flex items-center gap-1"><Tag className="h-3 w-3" />{product.sku}</span>}
+                                    <span>판매가 {formatNumber(product.salePrice)}원</span>
+                                    {toNumber(product.buyCny) > 0 && <span>¥{product.buyCny}</span>}
+                                    {toNumber(product.buyUsd) > 0 && <span>${product.buyUsd}</span>}
+                                  </div>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* 푸터 - 선택한 것 가져오기 */}
+        <div className="flex flex-col gap-3 border-t border-slate-100 bg-white p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm text-slate-600">
+            {totalSelectedCount > 0 ? (
+              <span>총 <strong className="text-slate-900">{totalSelectedCount}개</strong> 상품 선택됨</span>
+            ) : (
+              <span className="text-slate-400">상품을 선택하거나 묶음 전체를 가져올 수 있어요</span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-2xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+            >
+              취소
+            </button>
+            <button
+              onClick={handleImport}
+              disabled={totalSelectedCount === 0}
+              className="inline-flex items-center gap-2 rounded-2xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Copy className="h-4 w-4" />
+              선택한 {totalSelectedCount}개 가져오기
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -381,7 +758,7 @@ export default function App() {
   const [smartStoreFeeRate, setSmartStoreFeeRate] = useState("2");
   const [adCostRate, setAdCostRate] = useState("3");
   const [simpleVatRate, setSimpleVatRate] = useState("15");
-  const [actualTotalKrw, setActualTotalKrw] = useState("0"); // ← 묶음 전체 실제 결제액
+  const [actualTotalKrw, setActualTotalKrw] = useState("0");
 
   const [products, setProducts] = useState(makeSampleProducts());
   const [savedRecords, setSavedRecords] = useState([]);
@@ -394,6 +771,7 @@ export default function App() {
   const [dbMessage, setDbMessage] = useState("");
   const [expandedIds, setExpandedIds] = useState({});
   const [expandedResults, setExpandedResults] = useState({});
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   const sharedInput = useMemo(() => ({
     usdRate, cnyRate, overseasShipping, domesticShipping, packagingCost,
@@ -403,7 +781,6 @@ export default function App() {
 
   const result = useMemo(() => calculateRows(products, sharedInput), [products, sharedInput]);
 
-  // 환산 총액 계산 (참고용)
   const calcTotalKrw = useMemo(() => {
     return products.reduce((sum, p) => {
       const qty = Math.max(1, toNumber(p.qty));
@@ -488,6 +865,17 @@ export default function App() {
 
   const removeProduct = (id) => {
     setProducts((prev) => prev.length <= 1 ? prev : prev.filter((item) => item.id !== id));
+  };
+
+  // 모달에서 가져온 상품을 현재 목록에 적용
+  const handleImportProducts = (importedProducts, mode) => {
+    if (mode === "replace") {
+      setProducts(importedProducts);
+      setDbMessage(`${importedProducts.length}개 상품을 불러와 목록을 교체했습니다.`);
+    } else {
+      setProducts((prev) => [...prev, ...importedProducts]);
+      setDbMessage(`${importedProducts.length}개 상품을 목록에 추가했습니다.`);
+    }
   };
 
   const buildBundlePayload = () => ({
@@ -728,11 +1116,20 @@ export default function App() {
 
           {/* 상품 목록 */}
           <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-4 flex items-center justify-between">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-lg font-bold">상품 목록</h2>
-              <button onClick={addProduct} className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
-                <Plus className="h-4 w-4" /> 상품 추가
-              </button>
+              <div className="flex flex-wrap gap-2">
+                {/* 상품 가져오기 버튼 - 새로 추가됨 */}
+                <button
+                  onClick={() => setIsImportModalOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+                >
+                  <FolderOpen className="h-4 w-4" /> 이전 상품 가져오기
+                </button>
+                <button onClick={addProduct} className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
+                  <Plus className="h-4 w-4" /> 상품 추가
+                </button>
+              </div>
             </div>
 
             <div className="space-y-4">
@@ -971,6 +1368,14 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* 상품 가져오기 모달 */}
+      <ImportProductsModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        savedRecords={savedRecords}
+        onImport={handleImportProducts}
+      />
     </div>
   );
 }
